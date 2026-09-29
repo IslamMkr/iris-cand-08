@@ -1,0 +1,11 @@
+*
+!requirements.txt
+!pyproject.toml
+!iris/
+!iris/**
+!tests/
+!tests/**
+!fixtures/
+!fixtures/**
+**/__pycache__/
+**/*.pyc

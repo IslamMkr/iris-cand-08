@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgis/postgis:16-3.5
+    environment:
+      POSTGRES_DB: iris
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 scripts/init_env.py first}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      IRIS_NRW_PASSWORD: ${IRIS_NRW_PASSWORD:?Missing contributor password}
+      IRIS_PEAT_PASSWORD: ${IRIS_PEAT_PASSWORD:?Missing contributor password}
+      IRIS_PROMOTER_PASSWORD: ${IRIS_PROMOTER_PASSWORD:?Missing promoter password}
+      IRIS_APP_PASSWORD: ${IRIS_APP_PASSWORD:?Missing app password}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - iris_data:/var/lib/postgresql/data
+      - ./sql:/iris-sql:ro
+      - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/20-iris.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d iris"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  verify:
+    build: .
+    env_file: .env
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: iris
+      IRIS_TEST_RESET: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  iris_data:
