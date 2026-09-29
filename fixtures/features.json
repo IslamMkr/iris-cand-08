@@ -1,0 +1,26 @@
+[
+  {
+    "dataset": "nrw",
+    "country_code": "DE",
+    "source_id": "fixture-001",
+    "ewkt": "SRID=4326;MULTIPOLYGON(((7 51,7.01 51,7.01 51.01,7 51.01,7 51)))",
+    "source_date": "2026-01-01",
+    "uncertainty": "Synthetic test polygon; no measured accuracy or real-world suitability asserted."
+  },
+  {
+    "dataset": "peat",
+    "country_code": "DE",
+    "source_id": "fixture-001",
+    "ewkt": "SRID=4326;MULTIPOLYGON(((8 52,8.01 52,8.01 52.01,8 52.01,8 52)))",
+    "source_date": "2026-01-01",
+    "uncertainty": "Synthetic test polygon; no peat presence or measured accuracy asserted."
+  },
+  {
+    "dataset": "peat",
+    "country_code": "NL",
+    "source_id": "fixture-001",
+    "ewkt": "SRID=4326;MULTIPOLYGON(((6 52,6.01 52,6.01 52.01,6 52.01,6 52)))",
+    "source_date": "2026-01-01",
+    "uncertainty": "Synthetic second-country fixture for key isolation; not a real source dataset."
+  }
+]
