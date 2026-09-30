@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import secrets
+import time
 
 import psycopg
 from psycopg import sql
@@ -197,13 +198,30 @@ def test_country_and_dataset_scoped_promotion_is_idempotent(seeded, admin):
         ).fetchone()[0]
 
 
-def test_concurrent_promotion_inserts_exactly_once(seeded, admin):
-    def publish():
-        with connect("promoter") as conn:
-            return promote(conn, seeded[0])
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda _: publish(), range(2)))
-    assert sorted(results) == [0, 1]
+@pytest.mark.parametrize("first_commits", (True, False), ids=("commit", "rollback"))
+def test_concurrent_promotion_inserts_exactly_once(seeded, admin, first_commits):
+    with connect("promoter") as first, connect("promoter") as second:
+        # A timeout bounds the worker even if an assertion or connection fails.
+        second.execute("SET statement_timeout = '10s'")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with first.transaction(force_rollback=not first_commits):
+                assert promote(first, seeded[0]) == 1
+                future = pool.submit(promote, second, seeded[0])
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    blockers = admin.execute(
+                        "SELECT pg_blocking_pids(%s)", (second.info.backend_pid,),
+                    ).fetchone()[0]
+                    if first.info.backend_pid in blockers:
+                        break
+                    if future.done():
+                        pytest.fail(f"Second promotion did not block: {future.result()}")
+                    time.sleep(0.02)
+                else:
+                    pytest.fail("Second promotion never waited on the first transaction")
+                assert not future.done()
+            # Commit skips the existing row; rollback lets the waiting caller insert.
+            assert future.result(timeout=10) == (0 if first_commits else 1)
     assert admin.execute("SELECT count(*) FROM iris_core.features").fetchone()[0] == 1
 
 
@@ -222,6 +240,8 @@ def test_promotion_respects_caller_rollback(seeded, admin):
     (("nrw", "de", "fixture-001"), "22023"),
     (("nrw", "DE", None), "22023"),
     (("nrw", "DE", " "), "22023"),
+    (("nrw", "DE", "\t\n"), "22023"),
+    (("nrw", "DE", "\u00a0\u200b\ufeff"), "22023"),
     (("nrw", "DE", "missing"), "P0002"),
     (("nrw", "NL", "fixture-001"), "P0002"),
 ))
@@ -272,7 +292,7 @@ def test_caller_search_path_cannot_redirect_promotion(seeded, admin):
 
 
 def test_new_relations_and_functions_require_explicit_grants(admin):
-    # Use the same creator as migrations; defaults belong to the creating role.
+    # Use the same creator as setup; defaults belong to the creating role.
     try:
         admin.execute("SET ROLE iris_owner")
         admin.execute("CREATE TABLE iris_staging_nrw.unassigned (country_code text NOT NULL)")
@@ -357,3 +377,52 @@ def test_offboarding_ends_access_without_deleting_data(admin):
         admin.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM {}").format(
             sql.Identifier(admin.info.dbname), sql.Identifier(role)))
         admin.execute("DROP ROLE iris_test_offboarding")
+
+
+@pytest.mark.parametrize("role", RUNTIME_ROLES)
+@pytest.mark.parametrize("statement", (
+    "SELECT pg_catalog.lo_create(0)",
+    "SELECT pg_catalog.lo_creat(-1)",
+    "SELECT pg_catalog.lo_from_bytea(0, 'blocked'::bytea)",
+))
+def test_runtime_roles_cannot_create_large_objects(role, statement, admin):
+    before = admin.execute("SELECT count(*) FROM pg_largeobject_metadata").fetchone()[0]
+    with connect(role) as conn:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            execute(conn, statement)
+    assert admin.execute("SELECT count(*) FROM pg_largeobject_metadata").fetchone()[0] == before
+
+
+@pytest.mark.parametrize("role", RUNTIME_ROLES)
+@pytest.mark.parametrize("statement", (
+    "SELECT pg_catalog.lo_put(%s, 0, 'blocked'::bytea)",
+    "SELECT pg_catalog.lo_unlink(%s)",
+    "SELECT pg_catalog.lo_open(%s, 131072)",
+))
+def test_even_preexisting_owned_large_objects_cannot_be_changed(role, statement, admin):
+    # Object ownership must not grant access to the disabled large-object API.
+    oid = admin.execute("SELECT lo_from_bytea(0, 'preserve'::bytea)").fetchone()[0]
+    try:
+        admin.execute(sql.SQL("ALTER LARGE OBJECT {} OWNER TO {}").format(
+            sql.Literal(oid), sql.Identifier(role)))
+        with connect(role) as conn:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                execute(conn, statement, (oid,))
+        assert admin.execute("SELECT lo_get(%s)", (oid,)).fetchone()[0] == b"preserve"
+    finally:
+        admin.execute("SELECT lo_unlink(%s)", (oid,))
+
+
+def test_all_large_object_function_overloads_are_restricted(admin):
+    routines = admin.execute(
+        "SELECT p.oid, p.oid::regprocedure::text FROM pg_proc p "
+        "JOIN pg_namespace n ON n.oid=p.pronamespace "
+        "WHERE n.nspname='pg_catalog' AND "
+        "(p.proname LIKE 'lo\\_%' ESCAPE '\\' OR p.proname IN ('loread','lowrite'))"
+    ).fetchall()
+    assert len(routines) >= 20
+    for oid, name in routines:
+        for role in RUNTIME_ROLES:
+            assert not admin.execute(
+                "SELECT has_function_privilege(%s, %s, 'EXECUTE')", (role, oid),
+            ).fetchone()[0], (role, name)

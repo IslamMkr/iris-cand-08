@@ -1,3 +1,5 @@
+from datetime import date
+
 import psycopg
 from psycopg import sql
 import pytest
@@ -96,3 +98,68 @@ def test_geometry_on_coordinate_boundaries_can_be_published(dataset, coordinates
             "FROM iris_api.candidates WHERE country_code=%s AND dataset=%s AND source_id=%s",
             (record["ewkt"], record["country_code"], dataset, record["source_id"]),
         ).fetchone()[0]
+
+
+@pytest.fixture(params=(
+    ("iris_staging_nrw", "contributor_nrw"),
+    ("iris_staging_peat", "contributor_peat"),
+    ("iris_core", "postgres"),
+))
+def target(request):
+    return request.param
+
+
+def insert_into_target(target, **overrides):
+    schema, role = target
+    record = fixtures()[0] | overrides
+    statement = sql.SQL(
+        "INSERT INTO {} (country_code, source_id, geom, source_date, uncertainty{}) "
+        "VALUES (%s, %s, public.ST_GeomFromEWKT(%s), %s, %s{})"
+    ).format(
+        sql.Identifier(schema, "features"),
+        sql.SQL(", dataset" if schema == "iris_core" else ""),
+        sql.SQL(", 'nrw'" if schema == "iris_core" else ""),
+    )
+    with connect(role) as conn:
+        execute(conn, statement, (
+            record["country_code"], record["source_id"], record["ewkt"],
+            record["source_date"], record["uncertainty"],
+        ))
+
+
+@pytest.mark.parametrize("value", ("infinity", "-infinity", "10000-01-01", "0001-01-01 BC"))
+def test_dates_unreadable_by_python_are_rejected(target, value):
+    with pytest.raises(psycopg.errors.CheckViolation) as caught:
+        insert_into_target(target, source_date=value)
+    assert caught.value.diag.constraint_name == "features_source_date_range_check"
+
+
+@pytest.mark.parametrize("field", ("source_id", "uncertainty"))
+@pytest.mark.parametrize("value", (
+    "\t", "\n", "\r\n \v\f", "\u00a0", "\u2003\u202f",
+    "\u0085\u1680\u2028\u2029\u205f\u3000", "\u200b\ufeff",
+))
+def test_blank_metadata_is_rejected_in_every_table(target, field, value):
+    with pytest.raises(psycopg.errors.CheckViolation) as caught:
+        insert_into_target(target, **{field: value})
+    assert caught.value.diag.constraint_name == f"features_{field}_text_check"
+
+
+@pytest.mark.parametrize("dataset", ("nrw", "peat"))
+@pytest.mark.parametrize("source_date", (date.min, date.max))
+def test_date_boundaries_and_unicode_text_round_trip(dataset, source_date):
+    record = fixtures()[0] | {
+        "dataset": dataset, "source_date": source_date,
+        "source_id": "\tidentifiant-Ω\u00a0",
+        "uncertainty": "\nPrécision inconnue — synthetic test.\u2003",
+    }
+    with connect(f"contributor_{dataset}") as conn:
+        insert_record(conn, record)
+    with connect("promoter") as conn:
+        assert conn.execute("SELECT iris_ops.promote(%s, %s, %s)", (
+            dataset, record["country_code"], record["source_id"],
+        )).fetchone()[0] == 1
+    with connect("app_readonly") as conn:
+        assert conn.execute(
+            "SELECT source_id, source_date, uncertainty FROM iris_api.candidates"
+        ).fetchone() == (record["source_id"], source_date, record["uncertainty"])
