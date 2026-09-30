@@ -1,204 +1,183 @@
-# IRIS - Contributor database isolation
+# IRIS-CAND-08 - Contributor Database Isolation
 
-Each contributor loads data into an assigned staging area. A promoter reviews
-and publishes selected records. The app reads the published data through a view.
-PostgreSQL enforces these permissions for every connection.
+Contributors load their assigned datasets into separate PostgreSQL staging schemas.
+A promoter publishes selected records, and the application reads a candidate view.
+PostgreSQL enforces the permissions, including for direct SQL connections.
 
-[Design decisions](PRESUPPOSITIONS.md) · [Test results](VALIDATION.md)
+## Run the assignment
 
-## Start locally
+Requirements: a running Docker engine with Compose v2 and Python 3.12+ on the
+host. PostgreSQL 16.15, PostGIS 3.5.7, and the Python dependencies run in containers.
+On Windows, use `python` if `python3` is unavailable; run the Bash examples below
+in WSL or Git Bash. On WSL, enable Docker Desktop integration.
 
-You need Docker with Compose v2 and Python 3.12+. On WSL, enable Docker Desktop
-integration. On Windows, use `python` if `python3` is unavailable.
+From the repository root:
 
-Run these commands from the project root. Skip the first command if `.env`
-already exists. **The tests clear all records in the staging and core tables.**
+```bash
+python3 scripts/verify.py
+```
+
+This command generates temporary credentials, builds the image, initializes a fresh
+PostgreSQL/PostGIS database, runs the permission and data tests, and demonstrates
+loading, publishing, and reading three sample records. It prints the SQL checks
+and removes its temporary database and verification image afterward. No manual
+database preparation or external credentials are needed.
+
+The database image creates the database, then `scripts/init-db.sh` runs
+`sql/setup.sql` to create its roles, schemas, tables, view, and promotion function
+in one transaction. Docker images are pinned by digest, and Python dependencies
+are pinned with hashes. Tests use real authenticated role connections.
+
+Verification uses `compose.verify.yaml`, a unique Docker project, and a temporary
+`iris_test` database without an exposed host port. It does not need a `.env` file.
+The optional interactive demo below uses `compose.yaml` and a persistent `iris`
+database. Each test clears only the verification database's business tables.
+
+Verified from a clean Git checkout: **257 tests passed**, followed by successful
+ingestion, promotion, and application reads of all three sample records.
+On success, the command ends with:
+
+```text
+Tests and demo passed. Temporary database removed.
+```
+
+To save the permission-test transcript in Bash:
+
+```bash
+mkdir -p artifacts
+set -o pipefail
+python3 scripts/verify.py 2>&1 | tee artifacts/permission-tests.txt
+```
+
+## Access model
+
+| Role               | Allowed access                                       |
+| ------------------ | ---------------------------------------------------- |
+| `contributor_nrw`  | `SELECT`, `INSERT` on `iris_staging_nrw.features`    |
+| `contributor_peat` | `SELECT`, `INSERT` on `iris_staging_peat.features`   |
+| `promoter`         | Read both staging tables; execute `iris_ops.promote` |
+| `app_readonly`     | `SELECT` on `iris_api.candidates`                    |
+
+Contributors cannot modify existing rows, alter tables, access another dataset,
+write core records, or promote data. Runtime roles cannot assume privileged roles
+or use the large-object API. The database cluster is dedicated to this assignment.
+Setup revokes runtime access to every other existing database. System metadata
+remains visible.
+
+New databases receive PostgreSQL's default public connection privileges. If an
+administrator adds one later, create it with connections disabled, revoke public
+access, then enable connections and grant access only to its intended users:
+
+```sql
+CREATE DATABASE another_database ALLOW_CONNECTIONS false;
+REVOKE ALL ON DATABASE another_database FROM PUBLIC;
+ALTER DATABASE another_database ALLOW_CONNECTIONS true;
+```
+
+These commands require an administrator; none of the runtime roles can create
+databases. The supplied Docker configurations create no additional databases
+after setup.
+
+Non-login roles own the objects. The promotion function runs as a separate owner
+with only the permissions needed to read staging and insert core records. Its
+fixed `search_path` and fixed table references protect the publication operation.
+The application view exposes published records without granting core-table access.
+
+Promotion identifies a dataset, country, and source ID. Calling the function
+approves that record. It preserves staging, returns `1` when inserting and `0`
+when already published, and cannot overwrite a published record. Tests cover
+concurrent calls with both commit and rollback.
+
+## Data contract
+
+| Field          | Required value                                                    |
+| -------------- | ----------------------------------------------------------------- |
+| `country_code` | Two uppercase letters; included in record keys and joins          |
+| `source_id`    | Identifier containing a nonblank character                        |
+| `geom`         | Valid, nonempty 2D MultiPolygon with explicit SRID 4326           |
+| `source_date`  | Date from `0001-01-01` through `9999-12-31`, readable by Python   |
+| `uncertainty`  | Nonblank description, explicitly stating when accuracy is unknown |
+
+Coordinates are longitude and latitude in degrees, bounded by ±180 and ±90.
+Missing CRS, invalid geometry, and incomplete records are rejected; values are
+never silently repaired or invented. Blank text means Unicode White_Space plus
+zero-width space (U+200B) and BOM (U+FEFF). Accepted text is stored unchanged.
+
+Staging keys are `(country_code, source_id)`; the core key is
+`(country_code, dataset, source_id)`.
+Access is assigned by dataset, not country. The three synthetic fixtures reuse
+one source ID across NRW/DE and peat/DE/NL to verify identity isolation.
+
+The application interface supports reading published geometry and basic GeoJSON
+output, for example `ST_AsGeoJSON(geom)`. Runtime roles cannot read PostGIS's
+`spatial_ref_sys` reference table, so operations that need it, including
+`ST_Transform(geom, ...)` and `ST_Area(geom::geography)`, fail with a permission
+error. Spatial calculations are outside this assignment's interface; adding them
+would require a deliberate extension of the access model.
+
+## Optional persistent demo
+
+For an interactive database, generate local credentials and run the demo:
 
 ```bash
 python3 scripts/init_env.py
 docker compose up -d --wait db
-docker compose build verify
-docker compose run --rm verify
-docker compose run --rm verify python -m iris
+docker compose run --build --rm demo
 ```
 
-The password script creates `.env`, which is excluded from Git and container
-images. The last command loads and publishes three sample records, then reads
-them as the app. Running it again leaves existing records unchanged.
+Skip credential generation if `.env` already exists; the script refuses to
+overwrite it. Passwords are supplied through the environment and kept outside
+Git and container images. The database is available at `127.0.0.1:55432`.
+Repeating the demo leaves existing records unchanged. `docker compose down`
+stops the containers and retains the demo data for the next run.
 
-The database is available at `127.0.0.1:55432`. Compose uses PostgreSQL 16,
-PostGIS 3.5, and Python 3.12.
+Setup runs only on an empty database volume. Editing `sql/setup.sql` or `.env`
+and restarting does not migrate an existing database or rotate its passwords.
+The SQL is a one-time bootstrap, not a rerunnable migration. The verification
+command always tests a fresh database; it does not validate an existing demo volume.
 
-Stop the services with `docker compose down`. To delete the local database,
-run `docker compose down -v`. Start it again to create a fresh database.
-Setup runs only on an empty volume; editing `.env` does not change passwords
-in an existing database.
-
-### Upgrade an existing database
-
-For a database initialized before migration `004_hardening.sql`, disconnect runtime
-clients and apply this migration once, without deleting the volume:
+For a disposable demo whose records can be deleted, recreate it explicitly:
 
 ```bash
-docker compose exec db psql -X -U postgres -d iris --single-transaction \
-  --set=ON_ERROR_STOP=1 --file=/iris-sql/004_hardening.sql
-docker compose build verify
+docker compose down --volumes  # Deletes all persistent demo records.
+docker compose up -d --wait db
+docker compose run --build --rm demo
 ```
 
-The migration removes public access to other databases in this dedicated cluster
-and validates coordinate bounds on existing staging and core rows. It preserves
-the records. If any geometry is outside the bounds, the whole migration rolls back;
-investigate and explicitly correct the source data before retrying. Fresh installs
-apply the migration automatically. CONNECT revocations affect new connections,
-which is why existing runtime sessions must be disconnected first.
+For records that must be retained, use a reviewed migration or backup/restore
+procedure. This image pin uses Alpine; a demo volume created with the previous
+Debian image should be reset if disposable, or moved with a logical dump/restore
+and validation rather than reused across the OS change. Password rotation also
+requires `ALTER ROLE ... PASSWORD` and corresponding environment updates.
 
-## Who can do what
-
-| Role               | Access                                               |
-| ------------------ | ---------------------------------------------------- |
-| `contributor_nrw`  | Read and insert into `iris_staging_nrw.features`     |
-| `contributor_peat` | Read and insert into `iris_staging_peat.features`    |
-| `promoter`         | Read both staging tables and call `iris_ops.promote` |
-| `app_readonly`     | Read `iris_api.candidates`                           |
-
-```mermaid
-flowchart LR
-    NRW[contributor_nrw] -->|INSERT / SELECT| NS[iris_staging_nrw.features]
-    PEAT[contributor_peat] -->|INSERT / SELECT| PS[iris_staging_peat.features]
-    P[promoter] -->|SELECT for review| NS
-    P -->|SELECT for review| PS
-    P -->|EXECUTE| F[iris_ops.promote]
-    NS -->|Selected record| F
-    PS -->|Selected record| F
-    F -->|Controlled INSERT| C[iris_core.features]
-    C -->|Published records| V[iris_api.candidates]
-    A[app_readonly] -->|SELECT| V
-```
-
-These accounts cannot edit or delete staging rows, change table definitions,
-write directly to core, or assume another role. New tables and functions need
-explicit grants. PostgreSQL system metadata remains visible.
-
-The cluster is dedicated to IRIS. Bootstrap removes `PUBLIC` database privileges
-throughout the cluster, including `postgres` and `template_postgis`; runtime roles
-receive `CONNECT` only on `iris`. If an administrator creates another database
-later, revoke its `PUBLIC` privileges before allowing clients to connect:
-
-```sql
-REVOKE ALL ON DATABASE new_database FROM PUBLIC;
-```
-
-Two roles own the database objects: `iris_owner` owns the tables and view, and
-`iris_promote_executor` owns the promotion function. Neither role allows login.
-The function owner can read staging, insert into core, and read the key columns
-needed to check for duplicates. This keeps ownership separate from user access.
-
-## Publish a record
-
-Open a session as the promoter:
+Open a promoter session:
 
 ```bash
 docker compose exec db sh -c 'PGPASSWORD="$IRIS_PROMOTER_PASSWORD" psql -X -h 127.0.0.1 -U promoter -d iris'
 ```
 
-Review the staging data, then publish a record:
-
 ```sql
 SELECT * FROM iris_staging_nrw.features;
-SELECT iris_ops.promote('nrw', 'DE', 'fixture-001');
--- 1 = inserted; 0 = already published
+SELECT iris_ops.promote('nrw', 'DE', 'fixture-001'); -- 0: already published by the demo
 ```
 
-The function accepts `nrw` or `peat`, a country code, and a source ID. Calling it
-approves that record. It copies the record into core and keeps the staging row.
-
-Invalid arguments or missing records cause an error. Repeated or simultaneous
-calls cannot create duplicates or overwrite published data. Rolling back the
-transaction also rolls back publication.
-
-The function uses `SECURITY DEFINER` to run with its owner's limited permissions.
-Fixed table references and a fixed `search_path` prevent callers from redirecting
-it to other objects. See the [PostgreSQL guidance](https://www.postgresql.org/docs/16/sql-createfunction.html#SQL-CREATEFUNCTION-SECURITY).
-
-## Read published records
-
-Open a session as the app:
+Open an application session:
 
 ```bash
 docker compose exec db sh -c 'PGPASSWORD="$IRIS_APP_PASSWORD" psql -X -h 127.0.0.1 -U app_readonly -d iris'
 ```
 
-Query the published view:
-
 ```sql
-SELECT country_code, dataset, source_id FROM iris_api.candidates;
+SELECT country_code, dataset, source_id FROM iris_api.candidates; -- allowed
+SELECT * FROM iris_core.features;                              -- denied
 ```
 
-Use `\q` to leave either database session.
+Use `\q` to leave a database session.
 
-## Data rules
+## Contributor onboarding and offboarding
 
-Every record needs these fields:
-
-| Field          | Accepted value                                          |
-| -------------- | ------------------------------------------------------- |
-| `country_code` | Two uppercase letters                                   |
-| `source_id`    | Nonempty source identifier                              |
-| `geom`         | Valid, nonempty 2D MultiPolygon with explicit SRID 4326 |
-| `source_date`  | Source date                                             |
-| `uncertainty`  | Nonempty description; state when accuracy is unknown    |
-
-Each staging table uses `(country_code, source_id)` as its key. Core uses
-`(country_code, dataset, source_id)`. Use the same fields when joining records.
-Permissions are assigned by dataset. Country codes are checked for format only.
-
-Coordinates are longitude and latitude in degrees. Missing CRS or required
-fields are rejected. Longitude must be within [-180, 180] and latitude within
-[-90, 90], including the endpoints. These bounds are enforced in staging and core.
-Geometry is not automatically transformed or repaired; bounds checks cannot
-identify a wrong CRS label when the supplied numbers still fall inside the bounds.
-
-`fixtures/features.json` contains three synthetic records for NRW/DE and
-peat/DE/NL. They reuse one source ID to test country and dataset isolation.
-These are test records, not real source data.
-
-## Run tests
-
-Use the local test database: **each test clears the staging and core tables.**
-
-```bash
-docker compose run --rm verify
-```
-
-Tests use real role logins. They check allowed and blocked operations, data
-validation, coordinate bounds, connections to other databases, duplicate prevention,
-simultaneous publication, and access removal.
-See [VALIDATION.md](VALIDATION.md) for recorded results.
-
-To save the SQL output in Bash:
-
-```bash
-mkdir -p artifacts
-set -o pipefail
-docker compose run --rm verify 2>&1 | tee artifacts/permission-tests.txt
-```
-
-## Add or remove a contributor
-
-```mermaid
-flowchart LR
-    subgraph Onboarding
-        direction LR
-        Create[Create login] --> Grant[Grant assigned scope] --> Test[Test real login]
-    end
-    subgraph Offboarding
-        direction LR
-        Disable[Disable login and revoke access] --> EndSessions[End active sessions]
-        EndSessions --> Check[Check access is blocked]
-    end
-```
-
-To add a contributor, enter a new password in Bash and open an admin session:
+These examples use the optional persistent demo above. To add a contributor,
+enter a new password in Bash and open an admin session:
 
 ```bash
 read -rs -p "New contributor password: " IRIS_NEW_PASSWORD
@@ -206,7 +185,7 @@ export IRIS_NEW_PASSWORD
 docker compose exec -e IRIS_NEW_PASSWORD db psql -X -U postgres -d iris
 ```
 
-Run this SQL to grant access to NRW staging:
+Grant only the assigned dataset:
 
 ```sql
 \getenv new_password IRIS_NEW_PASSWORD
@@ -219,14 +198,11 @@ GRANT SELECT, INSERT ON iris_staging_nrw.features TO contributor_example;
 COMMIT;
 ```
 
-Exit with `\q`, then run `unset IRIS_NEW_PASSWORD` in your shell. Sign in with
-the new account and enter its password when prompted:
+Exit with `\q`, run `unset IRIS_NEW_PASSWORD`, and verify the new account:
 
 ```bash
 docker compose exec db psql -X -h 127.0.0.1 -U contributor_example -d iris
 ```
-
-Check its access:
 
 ```sql
 SELECT country_code, source_id FROM iris_staging_nrw.features; -- allowed
@@ -234,15 +210,8 @@ SELECT * FROM iris_staging_peat.features;                     -- denied
 SELECT * FROM iris_core.features;                             -- denied
 ```
 
-Exit with `\q` when finished.
-
-To remove access, open an admin session:
-
-```bash
-docker compose exec db psql -X -U postgres -d iris
-```
-
-Run:
+To remove access, open an admin session with
+`docker compose exec db psql -X -U postgres -d iris`, then run:
 
 ```sql
 BEGIN;
@@ -256,41 +225,33 @@ FROM pg_stat_activity
 WHERE usename = 'contributor_example' AND pid <> pg_backend_pid();
 ```
 
-Remove any additional grants or memberships too. Confirm existing sessions end
-and new connections fail. Disabling login alone does not end active sessions.
-The contributor's data stays in place.
+Remove any additional grants or memberships too. Confirm that active sessions end
+and new connections fail. Contributed records remain in place.
 
-To add a dataset, create its staging table as `iris_owner`, add a promotion branch,
-update the core dataset constraint, and add the required grants and tests.
+## Assumptions and limits
 
-## Run without Docker
-
-Install Python 3.12+, PostgreSQL 16+, and the PostGIS 3.4+ server package. Create an
-empty `iris` database in a dedicated local cluster with SCRAM authentication.
-Generate `.env` with `python3 scripts/init_env.py` if it does not exist, and set
-that cluster's `postgres` password to match `POSTGRES_PASSWORD`.
-
-Run from the project root, adjusting the host and port for your cluster:
-
-```bash
-set -a
-. ./.env
-set +a
-export PGHOST=127.0.0.1 PGPORT=55432 PGDATABASE=iris
-export PGUSER=postgres PGPASSWORD="$POSTGRES_PASSWORD"
-psql -X -v ON_ERROR_STOP=1 -f sql/bootstrap.sql
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-IRIS_TEST_RESET=1 .venv/bin/python -m pytest -v -s
-.venv/bin/python -m iris
-```
-
-Database setup runs once and requires unused role names. Tests check for the
-setup marker and `IRIS_TEST_RESET=1` before clearing data.
+The two datasets have fixed layouts, and each supplied login represents one role.
+A promotion call constitutes approval; runtime roles cannot change published
+records, and there is no separate approval history. Publication does not assert
+site suitability.
+Country codes are checked for format, and coordinate bounds cannot detect every
+incorrect CRS label. Administrators are trusted. Production extensions would
+include individual identities, recorded approvals, reviewed corrections, managed
+secrets, and source-specific geographic validation.
 
 ## Files
 
-- `sql/`: roles, tables, promotion function, and grants.
-- `iris/`: database helpers and the sample-data command.
-- `tests/` and `fixtures/`: automated checks and sample records.
-- `scripts/`: password generation and database startup.
+| Files                                                                                              | Purpose                                                           |
+| -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| [sql/setup.sql](sql/setup.sql)                                                                     | Complete initial schema, roles, promotion function, and grants    |
+| [scripts/verify.py](scripts/verify.py)                                                             | Single-command tests and demonstration in a fresh database        |
+| [scripts/init-db.sh](scripts/init-db.sh)                                                           | Automatic container database setup                                |
+| [scripts/init_env.py](scripts/init_env.py)                                                         | Credentials for the optional persistent demo                      |
+| [iris/db.py](iris/db.py), [iris/__main__.py](iris/__main__.py)                                     | Database helpers and the sample-data command                      |
+| [tests/](tests/), [fixtures/features.json](fixtures/features.json)                                 | Permission/data tests and three synthetic records                 |
+| [compose.verify.yaml](compose.verify.yaml), [compose.yaml](compose.yaml), [Dockerfile](Dockerfile) | Verification and persistent-demo containers                       |
+| [requirements.txt](requirements.txt), [pyproject.toml](pyproject.toml)                             | Locked dependencies, Python requirement, and pytest configuration |
+
+This README is the submission's documentation. Generated logs, `.env`, virtual
+environments, and Python caches are local files excluded from Git; omit them
+from a ZIP submission as well.
