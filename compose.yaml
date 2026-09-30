@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgis/postgis:16-3.5
+    image: postgis/postgis:16-3.5-alpine@sha256:47e961a569fd52ff31f0fe205ed91eeab17d9f5fff6722e6d7ea6b588748b293
     environment:
       POSTGRES_DB: iris
       POSTGRES_USER: postgres
@@ -24,14 +24,17 @@ services:
       retries: 30
       start_period: 10s
 
-  verify:
+  demo:
     build: .
-    env_file: .env
     environment:
       PGHOST: db
       PGPORT: "5432"
       PGDATABASE: iris
-      IRIS_TEST_RESET: "1"
+      IRIS_NRW_PASSWORD: ${IRIS_NRW_PASSWORD:?Missing contributor password}
+      IRIS_PEAT_PASSWORD: ${IRIS_PEAT_PASSWORD:?Missing contributor password}
+      IRIS_PROMOTER_PASSWORD: ${IRIS_PROMOTER_PASSWORD:?Missing promoter password}
+      IRIS_APP_PASSWORD: ${IRIS_APP_PASSWORD:?Missing app password}
+    command: ["python", "-m", "iris"]
     depends_on:
       db:
         condition: service_healthy

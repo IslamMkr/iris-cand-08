@@ -9,6 +9,8 @@ from iris.db import connect, fixtures, insert_record
 def admin():
     if os.environ.get("IRIS_TEST_RESET") != "1":
         pytest.fail("Set IRIS_TEST_RESET=1 to test the disposable local database.")
+    if os.environ.get("PGDATABASE") != "iris_test":
+        pytest.fail("Destructive tests require the dedicated iris_test database.")
     with connect("postgres") as conn:
         marker = conn.execute(
             "SELECT shobj_description(oid, 'pg_database') FROM pg_database "

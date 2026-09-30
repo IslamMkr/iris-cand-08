@@ -1,0 +1,43 @@
+# Used by scripts/verify.py with a unique project and temporary credentials.
+# This configuration has no application volume or published database port.
+services:
+  db:
+    image: postgis/postgis:16-3.5-alpine@sha256:47e961a569fd52ff31f0fe205ed91eeab17d9f5fff6722e6d7ea6b588748b293
+    environment:
+      POSTGRES_DB: iris_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Use python3 scripts/verify.py}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      IRIS_NRW_PASSWORD: ${IRIS_NRW_PASSWORD:?Use python3 scripts/verify.py}
+      IRIS_PEAT_PASSWORD: ${IRIS_PEAT_PASSWORD:?Use python3 scripts/verify.py}
+      IRIS_PROMOTER_PASSWORD: ${IRIS_PROMOTER_PASSWORD:?Use python3 scripts/verify.py}
+      IRIS_APP_PASSWORD: ${IRIS_APP_PASSWORD:?Use python3 scripts/verify.py}
+      IRIS_TEST_RESET: "1"
+    volumes:
+      - test_data:/var/lib/postgresql/data
+      - ./sql:/iris-sql:ro
+      - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/20-iris.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d iris_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+  verify:
+    build: .
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: iris_test
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Use python3 scripts/verify.py}
+      IRIS_NRW_PASSWORD: ${IRIS_NRW_PASSWORD:?Use python3 scripts/verify.py}
+      IRIS_PEAT_PASSWORD: ${IRIS_PEAT_PASSWORD:?Use python3 scripts/verify.py}
+      IRIS_PROMOTER_PASSWORD: ${IRIS_PROMOTER_PASSWORD:?Use python3 scripts/verify.py}
+      IRIS_APP_PASSWORD: ${IRIS_APP_PASSWORD:?Use python3 scripts/verify.py}
+      IRIS_TEST_RESET: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+volumes:
+  test_data:
