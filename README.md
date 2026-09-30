@@ -247,11 +247,7 @@ secrets, and source-specific geographic validation.
 | [scripts/verify.py](scripts/verify.py)                                                             | Single-command tests and demonstration in a fresh database        |
 | [scripts/init-db.sh](scripts/init-db.sh)                                                           | Automatic container database setup                                |
 | [scripts/init_env.py](scripts/init_env.py)                                                         | Credentials for the optional persistent demo                      |
-| [iris/db.py](iris/db.py), [iris/__main__.py](iris/__main__.py)                                     | Database helpers and the sample-data command                      |
+| [iris/db.py](iris/db.py), [iris/**main**.py](iris/__main__.py)                                     | Database helpers and the sample-data command                      |
 | [tests/](tests/), [fixtures/features.json](fixtures/features.json)                                 | Permission/data tests and three synthetic records                 |
 | [compose.verify.yaml](compose.verify.yaml), [compose.yaml](compose.yaml), [Dockerfile](Dockerfile) | Verification and persistent-demo containers                       |
 | [requirements.txt](requirements.txt), [pyproject.toml](pyproject.toml)                             | Locked dependencies, Python requirement, and pytest configuration |
-
-This README is the submission's documentation. Generated logs, `.env`, virtual
-environments, and Python caches are local files excluded from Git; omit them
-from a ZIP submission as well.
