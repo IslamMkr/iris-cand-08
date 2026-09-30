@@ -3,4 +3,11 @@
 set -euo pipefail
 psql --no-psqlrc --set=ON_ERROR_STOP=1 \
   --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-  --file /iris-sql/bootstrap.sql
+  --file /iris-sql/setup.sql
+
+# Only the separate verification service opts into destructive tests.
+if [[ "$POSTGRES_DB" == "iris_test" && "${IRIS_TEST_RESET:-}" == "1" ]]; then
+  psql --no-psqlrc --set=ON_ERROR_STOP=1 \
+    --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+    --command "COMMENT ON DATABASE iris_test IS 'IRIS-CAND-08 disposable local fixture database'"
+fi
